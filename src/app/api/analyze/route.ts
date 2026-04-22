@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import {
   detectDirectSkill,
   detectGithubSkills,
+  GithubRateLimitError,
   parseSourceUrl,
 } from "@/lib/sources";
 
@@ -52,6 +53,20 @@ export async function POST(request: NextRequest) {
       })),
     });
   } catch (err) {
+    if (err instanceof GithubRateLimitError) {
+      return Response.json(
+        {
+          error: err.message,
+          code: "rate_limited",
+          retryAfter: err.retryAfterSec,
+          authenticated: err.authenticated,
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": String(err.retryAfterSec) },
+        },
+      );
+    }
     const message = err instanceof Error ? err.message : "Something went wrong.";
     return Response.json({ error: message }, { status: 500 });
   }

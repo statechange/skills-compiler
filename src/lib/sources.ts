@@ -150,6 +150,21 @@ interface GithubTreeResponse {
 
 const GITHUB_API = "https://api.github.com";
 
+export class GithubRateLimitError extends Error {
+  readonly retryAfterSec: number;
+  readonly authenticated: boolean;
+  constructor(retryAfterSec: number, authenticated: boolean) {
+    super(
+      authenticated
+        ? "GitHub's authenticated rate limit kicked in — we'll try again in a moment."
+        : "GitHub's unauthenticated rate limit kicked in — we'll try again in a moment. Setting GITHUB_TOKEN makes this very unlikely.",
+    );
+    this.name = "GithubRateLimitError";
+    this.retryAfterSec = retryAfterSec;
+    this.authenticated = authenticated;
+  }
+}
+
 function ghHeaders(): HeadersInit {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
@@ -162,10 +177,44 @@ function ghHeaders(): HeadersInit {
   return headers;
 }
 
+function isRateLimited(res: Response): boolean {
+  if (res.status !== 403 && res.status !== 429) return false;
+  const remaining = res.headers.get("x-ratelimit-remaining");
+  if (remaining === "0") return true;
+  // Secondary rate limits come back as 403 with no remaining=0, but a retry-after.
+  return res.headers.has("retry-after");
+}
+
+function retryAfterSeconds(res: Response, fallback = 30): number {
+  const ra = res.headers.get("retry-after");
+  if (ra) {
+    const n = Number.parseInt(ra, 10);
+    if (!Number.isNaN(n) && n > 0) return Math.min(n, 120);
+  }
+  const reset = res.headers.get("x-ratelimit-reset");
+  if (reset) {
+    const resetAt = Number.parseInt(reset, 10) * 1000;
+    if (!Number.isNaN(resetAt)) {
+      const diff = Math.ceil((resetAt - Date.now()) / 1000);
+      if (diff > 0) return Math.min(diff, 120);
+    }
+  }
+  return fallback;
+}
+
+async function ghFetch(url: string): Promise<Response> {
+  const res = await fetch(url, { headers: ghHeaders() });
+  if (isRateLimited(res)) {
+    throw new GithubRateLimitError(
+      retryAfterSeconds(res),
+      Boolean(process.env.GITHUB_TOKEN),
+    );
+  }
+  return res;
+}
+
 async function resolveDefaultBranch(owner: string, repo: string): Promise<string> {
-  const res = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, {
-    headers: ghHeaders(),
-  });
+  const res = await ghFetch(`${GITHUB_API}/repos/${owner}/${repo}`);
   if (!res.ok) {
     throw new Error(
       `Couldn't load ${owner}/${repo} on GitHub (${res.status}). Is it public?`,
@@ -180,9 +229,8 @@ async function fetchTree(
   repo: string,
   branch: string,
 ): Promise<GithubTreeResponse> {
-  const res = await fetch(
+  const res = await ghFetch(
     `${GITHUB_API}/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-    { headers: ghHeaders() },
   );
   if (!res.ok) {
     throw new Error(
@@ -264,6 +312,12 @@ export async function detectGithubSkills(
     .filter((e) => e.type === "blob" && e.path.split("/").pop() === "SKILL.md")
     .map((e) => e.path);
 
+  // All detected skill folders (relative to the repo), so a parent skill can
+  // exclude files that belong to a nested sub-skill.
+  const allSkillFolders = skillMdPaths.map((p) =>
+    p.slice(0, -"SKILL.md".length).replace(/\/+$/, ""),
+  );
+
   const skills: DetectedSkill[] = [];
   for (const mdPath of skillMdPaths) {
     const folder = mdPath.slice(0, -"SKILL.md".length).replace(/\/+$/, "");
@@ -278,11 +332,20 @@ export async function detectGithubSkills(
     if (!parsed) continue;
 
     const folderPrefix = folder ? folder + "/" : "";
+    // Exclude paths that belong to a *nested* skill's folder so a parent skill
+    // doesn't claim its children's files.
+    const nestedPrefixes = allSkillFolders
+      .filter((f) => f !== folder && f !== "")
+      .filter((f) => (folderPrefix ? f.startsWith(folderPrefix) : true))
+      .filter((f) => f !== folder)
+      .map((f) => f + "/");
+
     const files: FileEntry[] = scoped
       .filter((e) => e.type === "blob")
       .filter((e) =>
         folderPrefix ? e.path.startsWith(folderPrefix) : true,
       )
+      .filter((e) => !nestedPrefixes.some((np) => e.path.startsWith(np)))
       .map((e) => ({
         path: folderPrefix ? e.path.slice(folderPrefix.length) : e.path,
         fetchUrl: rawUrl(resolved.owner, resolved.repo, branch, e.path),

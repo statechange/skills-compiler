@@ -7,6 +7,7 @@ import { rememberRecent } from "@/lib/recents";
 import {
   ArrowRight,
   ChevronRight,
+  Clock,
   Download,
   FileText,
   Loader2,
@@ -47,28 +48,40 @@ interface AnalyzeResponse {
 
 const EXAMPLES = [
   {
-    label: "Anthropic official skills",
+    label: "Anthropic official",
     url: "https://github.com/anthropics/skills",
+  },
+  {
+    label: "Matt Pocock",
+    url: "https://github.com/mattpocock/skills",
+  },
+  {
+    label: "Marketing skills",
+    url: "https://github.com/coreyhaines31/marketingskills",
+  },
+  {
+    label: "Vercel Labs",
+    url: "https://skills.sh/vercel-labs/skills",
   },
   {
     label: "Just the PDF skill",
     url: "https://github.com/anthropics/skills/tree/main/skills/pdf",
-  },
-  {
-    label: "Vercel Labs (skills.sh)",
-    url: "https://skills.sh/vercel-labs/skills",
-  },
-  {
-    label: "Shorthand",
-    url: "anthropics/skills",
   },
 ];
 
 type State =
   | { phase: "idle" }
   | { phase: "analyzing"; url: string }
+  | { phase: "rate-limited"; url: string; retryAt: number; authenticated: boolean }
   | { phase: "error"; message: string }
   | { phase: "ready"; url: string; skills: SkillPreview[] };
+
+interface RateLimitBody {
+  code: "rate_limited";
+  error: string;
+  retryAfter: number;
+  authenticated: boolean;
+}
 
 export function Compiler({ initialUrl = "" }: { initialUrl?: string }) {
   const router = useRouter();
@@ -87,6 +100,16 @@ export function Compiler({ initialUrl = "" }: { initialUrl?: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: trimmed }),
       });
+      if (res.status === 429) {
+        const body = (await res.json()) as RateLimitBody;
+        setState({
+          phase: "rate-limited",
+          url: trimmed,
+          retryAt: Date.now() + body.retryAfter * 1000,
+          authenticated: body.authenticated,
+        });
+        return;
+      }
       const data = (await res.json()) as AnalyzeResponse | { error: string };
       if (!res.ok || "error" in data) {
         const msg = "error" in data ? data.error : "Couldn't read that URL.";
@@ -131,6 +154,12 @@ export function Compiler({ initialUrl = "" }: { initialUrl?: string }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: state.url, skillId }),
     });
+    if (res.status === 429) {
+      const body = (await res.json().catch(() => ({}))) as Partial<RateLimitBody>;
+      throw new Error(
+        `GitHub asked us to slow down. Try again in ~${body.retryAfter ?? 30}s.`,
+      );
+    }
     if (!res.ok) {
       const err = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(err.error ?? "Couldn't build that skill.");
@@ -280,6 +309,14 @@ export function Compiler({ initialUrl = "" }: { initialUrl?: string }) {
         </Alert>
       )}
 
+      {state.phase === "rate-limited" && (
+        <RateLimitBanner
+          retryAt={state.retryAt}
+          authenticated={state.authenticated}
+          onRetry={() => analyze(state.url)}
+        />
+      )}
+
       {state.phase === "ready" && (
         <PreviewSection
           url={state.url}
@@ -321,6 +358,83 @@ export function Compiler({ initialUrl = "" }: { initialUrl?: string }) {
   );
 }
 
+function RateLimitBanner({
+  retryAt,
+  authenticated,
+  onRetry,
+}: {
+  retryAt: number;
+  authenticated: boolean;
+  onRetry: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const firedRef = useRef(false);
+
+  useEffect(() => {
+    firedRef.current = false;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [retryAt]);
+
+  const remainingSec = Math.max(0, Math.ceil((retryAt - now) / 1000));
+
+  useEffect(() => {
+    if (remainingSec === 0 && !firedRef.current) {
+      firedRef.current = true;
+      onRetry();
+    }
+  }, [remainingSec, onRetry]);
+
+  return (
+    <div className="rounded-2xl border border-accent-foreground/20 bg-accent/60 p-5 text-accent-foreground shadow-sm">
+      <div className="flex items-start gap-4">
+        <div className="mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-white/80 text-accent-foreground ring-1 ring-accent-foreground/15">
+          <Clock className="size-4" />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-base font-bold text-accent-foreground">
+            GitHub is asking us to slow down for a sec
+          </h3>
+          <p className="mt-1 text-sm leading-relaxed text-accent-foreground/85">
+            Hang tight — we&rsquo;ll try again automatically in{" "}
+            <span className="font-mono font-semibold tabular-nums">
+              {remainingSec}s
+            </span>
+            . No action needed on your end.
+          </p>
+          {!authenticated && (
+            <p className="mt-2 text-xs leading-relaxed text-accent-foreground/70">
+              Tip for the host of this app: set{" "}
+              <code className="rounded bg-white/70 px-1 py-0.5">
+                GITHUB_TOKEN
+              </code>{" "}
+              in <code className="rounded bg-white/70 px-1 py-0.5">.env.local</code>{" "}
+              to lift the limit by ~80×.
+            </p>
+          )}
+          <div className="mt-3 flex items-center gap-2">
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={onRetry}
+              disabled={remainingSec > 0}
+            >
+              {remainingSec > 0 ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  Waiting…
+                </>
+              ) : (
+                "Try now"
+              )}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HowStep({
   number,
   title,
@@ -341,7 +455,20 @@ function HowStep({
   );
 }
 
-function PreviewSection({
+function PreviewSection(props: {
+  url: string;
+  skills: SkillPreview[];
+  downloading: string | null;
+  onDownload: (skillIds: string[], tag: string) => void;
+  onReset: () => void;
+}) {
+  if (props.skills.length === 1) {
+    return <SingleSkillView {...props} skill={props.skills[0]} />;
+  }
+  return <MultiSkillView {...props} />;
+}
+
+function MultiSkillView({
   url,
   skills,
   downloading,
@@ -491,6 +618,126 @@ function PreviewSection({
             />
           ))}
         </ul>
+      </div>
+
+      <ImportInstructions />
+    </div>
+  );
+}
+
+function SingleSkillView({
+  url,
+  skill,
+  downloading,
+  onDownload,
+  onReset,
+}: {
+  url: string;
+  skill: SkillPreview;
+  downloading: string | null;
+  onDownload: (skillIds: string[], tag: string) => void;
+  onReset: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const totalKb = Math.max(
+    1,
+    Math.round(skill.files.reduce((t, f) => t + (f.size ?? 0), 0) / 1024),
+  );
+  const busy = downloading === `one:${skill.id}`;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">
+            Source
+          </div>
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="block max-w-[42ch] truncate text-sm font-medium text-foreground underline-offset-4 hover:underline"
+          >
+            {url}
+          </a>
+        </div>
+        <Button
+          variant="ghost"
+          size="lg"
+          className="h-10"
+          onClick={onReset}
+          disabled={busy}
+        >
+          Start over
+        </Button>
+      </div>
+
+      <div className="rounded-2xl bg-white p-6 ring-1 ring-foreground/10">
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:gap-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-2xl font-bold tracking-tight text-foreground">
+              {skill.manifest.name}
+            </h2>
+            {skill.folder && (
+              <div className="mt-1">
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                  /{skill.folder}
+                </code>
+              </div>
+            )}
+            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+              {skill.manifest.description}
+            </p>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <Badge variant="secondary" className="gap-1">
+                <FileText className="size-3" />
+                {skill.files.length} file{skill.files.length === 1 ? "" : "s"}
+              </Badge>
+              <Badge variant="outline" className="text-muted-foreground">
+                ~{totalKb} KB
+              </Badge>
+            </div>
+          </div>
+          <div className="shrink-0">
+            <Button
+              size="lg"
+              className="h-12 gap-2 px-5 text-base font-semibold"
+              onClick={() => onDownload([skill.id], `one:${skill.id}`)}
+              disabled={busy}
+            >
+              {busy ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Download className="size-4" />
+              )}
+              Download .skill
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-5 border-t border-border pt-4">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground transition hover:text-foreground"
+            aria-expanded={expanded}
+          >
+            <ChevronRight
+              className={`size-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+            {expanded ? "Hide" : "Show"} {skill.files.length} file
+            {skill.files.length === 1 ? "" : "s"}
+          </button>
+          {expanded && (
+            <ul className="mt-3 flex max-h-64 flex-col gap-0.5 overflow-y-auto rounded-lg bg-muted/50 p-3 font-mono text-xs text-muted-foreground">
+              {skill.files.map((f) => (
+                <li key={f.path} className="truncate">
+                  {f.path}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
 
       <ImportInstructions />
