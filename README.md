@@ -1,36 +1,58 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Skills Compiler
 
-## Getting Started
+**Turn any agent skill into a Claude-ready zip.**
 
-First, run the development server:
+Paste a GitHub repo, a folder inside a repo, a [skills.sh](https://skills.sh)
+link, or a direct URL to a `SKILL.md`. We bundle every skill we find into a
+ready-to-import `.skill` file for Claude Desktop — no terminal required.
+
+Downloaded files use the `.skill` extension (a zip under the hood — that's
+what Claude wants). Selecting multiple skills triggers multiple independent
+downloads, one `.skill` per skill, so you can drop each one into Claude
+directly.
+
+A gift from [State Change](https://statechange.ai). Made for the people who
+want AI to just work.
+
+## Supported URL shapes
+
+| You paste | What happens |
+| --- | --- |
+| `https://github.com/owner/repo` | Every `SKILL.md` in the repo |
+| `https://github.com/owner/repo/tree/main/some/folder` | Only skills inside that folder |
+| `https://skills.sh/org/repo` | Mapped to the matching GitHub repo |
+| `https://skills.sh/org/repo/skill` | Just that one skill |
+| `owner/repo` (shorthand) | Whole repo on GitHub |
+| `https://.../SKILL.md` | A single skill from that file |
+
+A "skill" is any folder with a `SKILL.md` whose YAML frontmatter has `name` and
+`description`.
+
+## Running locally
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Environment variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `GITHUB_TOKEN` _(optional)_ — a personal access token. Without it, the public
+  GitHub API allows 60 requests per hour per IP, which is usually fine for
+  casual use. Set this to avoid rate limits on busy days.
 
-## Learn More
+## Tech
 
-To learn more about Next.js, take a look at the following resources:
+- Next.js 16 (App Router) · React 19 · TypeScript
+- Tailwind CSS v4 + shadcn/ui
+- `jszip` for zip generation, `js-yaml` for frontmatter parsing
+- [`agentation`](https://www.agentation.com) for in-page visual feedback
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Importing into Claude Desktop
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. Open Claude Desktop (or Claude on the web).
+2. Go to **Settings → Capabilities → Skills**.
+3. Click **Upload skill** and choose the `.skill.zip` you downloaded.
+4. Enable the skill for the project you want to use it in.
